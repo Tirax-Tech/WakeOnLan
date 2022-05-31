@@ -18,7 +18,7 @@ module Helpers =
         let mac_bytes = Convert.FromHexString normalized
         in seq {
             for _ in 1..6 -> 0xFFuy
-            for _ = 1 to 16 do yield! mac_bytes
+            for _ in 1..16 do yield! mac_bytes
         }
         
     let getIPv4UnicastAddress (interface_properties :IPInterfaceProperties) =
@@ -36,12 +36,20 @@ module Helpers =
         |> Seq.map (fun u -> u.Address)
         |> Seq.tryHead
         
+    type SendResult = {
+        MulticastIP:string
+        UnicastIP :string
+        Result     :bool
+    }
+        
     let [<Literal>] WakeOnLanPort = 9 // Is it?
     let sendWakeOnLan (magic_paket :byte[]) (multicast_ip :IPAddress) (unicast_local_ip :IPAddress) = async {
         printfn $"Send WOL from {unicast_local_ip} to {multicast_ip}"
         use client = UdpClient(IPEndPoint(unicast_local_ip, 0))
         let! sent = client.SendAsync(magic_paket, magic_paket.Length, IPEndPoint(multicast_ip, WakeOnLanPort)) |> Async.AwaitTask
-        assert (sent = magic_paket.Length)
+        return { MulticastIP = multicast_ip.ToString()
+                 UnicastIP   = unicast_local_ip.ToString()
+                 Result      = sent = magic_paket.Length }
     }
     
     let [<Literal>] IPv6MulticastPrefix (* with zone index *) = "FF02::1%"
@@ -51,15 +59,17 @@ module Helpers =
         let ipv4_unicast_address = network |> getIPv4UnicastAddress
         let multicast_addresses = network.MulticastAddresses |> Seq.map (fun a -> a.Address)
         
-        async {
-            for ip in multicast_addresses do
-                let ip_text = ip.ToString()
-                let unicast_ip = if ip_text.StartsWith(IPv6MulticastPrefix, StringComparison.OrdinalIgnoreCase)
-                                 then ipv6_unicast_address
-                                 elif ip_text = IPv4Multicast then ipv4_unicast_address
-                                 else None
-                do! unicast_ip |> Option.iterAsync (sendWakeOnLan magic_packet ip)
-        }
+        let getUnitcastIp (multicast_ip :IPAddress) =
+            let ip_text = multicast_ip.ToString()
+            in if ip_text.StartsWith(IPv6MulticastPrefix, StringComparison.OrdinalIgnoreCase)
+               then ipv6_unicast_address
+               elif ip_text = IPv4Multicast then ipv4_unicast_address
+               else None
+               
+        multicast_addresses
+        |> Seq.choose (fun ip -> ip |> getUnitcastIp |> Option.map (fun unicast_ip -> ip, unicast_ip))
+        |> Seq.map (fun (ip, unicast_ip) -> unicast_ip |> sendWakeOnLan magic_packet ip)
+        |> Async.Parallel
 
 let wakeOnLan mac_address =
     let magic_packet = mac_address |> buildMagicPacket |> Seq.toArray
@@ -69,6 +79,10 @@ let wakeOnLan mac_address =
         |> Seq.filter (fun n -> n.NetworkInterfaceType <> NetworkInterfaceType.Loopback && n.OperationalStatus = OperationalStatus.Up)
         |> Seq.map (fun n -> n.GetIPProperties())
         
-    available_networks
-    |> Seq.map (broadcastWakeOnLan magic_packet)
-    |> Async.Parallel
+    let send_results = available_networks
+                       |> Seq.map (broadcastWakeOnLan magic_packet)
+                       |> Async.Sequential
+    in async {
+        let! result = send_results
+        return result |> Seq.collect id
+    }

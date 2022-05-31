@@ -1,6 +1,5 @@
 ﻿namespace TiraxTech.WakeOnLan.Controllers
 
-open System.Threading.Tasks
 open Microsoft.AspNetCore.Mvc
 open TiraxTech.WakeOnLan
 
@@ -11,4 +10,4 @@ type WolController() =
     
     [<HttpPost>]
     member _.Post(mac :string) =
-        mac |> WOL.wakeOnLan |> Async.StartImmediateAsTask :> Task
+        mac |> WOL.wakeOnLan |> Async.StartImmediateAsTask
